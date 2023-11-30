@@ -19,24 +19,21 @@ const (
 
 type (
 	Checker struct {
-		interval time.Duration
-		path     string
-		targets  []string
-		status   map[int]bool
-		mutex    sync.RWMutex
-		logger   *log.Logger
-		*CustomCheck
-	}
-
-	CustomCheck struct {
-		path  string
-		check *regexp.Regexp
+		interval   time.Duration
+		sourcePath string
+		targets    []string
+		checkPath  string
+		regex      *regexp.Regexp
+		status     map[int]bool
+		mutex      sync.RWMutex
+		logger     *log.Logger
 	}
 
 	Opts struct {
-		Interval    time.Duration
-		CustomCheck *CustomCheck
-		Logger      *log.Logger
+		Interval  time.Duration
+		CheckPath string
+		Regex     string
+		Logger    *log.Logger
 	}
 )
 
@@ -44,9 +41,9 @@ var client = http.Client{Timeout: defaultTimeout}
 
 func NewChecker(path string, targets []string, opts *Opts) *Checker {
 	c := &Checker{
-		path:    path,
-		targets: targets,
-		status:  make(map[int]bool),
+		sourcePath: path,
+		targets:    targets,
+		status:     make(map[int]bool),
 	}
 	if opts == nil {
 		c.interval = defaultInterval
@@ -58,44 +55,39 @@ func NewChecker(path string, targets []string, opts *Opts) *Checker {
 			c.interval = opts.Interval
 		}
 		c.logger = opts.Logger
-		c.CustomCheck = opts.CustomCheck
+		c.checkPath = opts.CheckPath
+		if opts.Regex != "" {
+			c.regex = regexp.MustCompile(opts.Regex)
+		}
 	}
 	c.start()
 	return c
 }
 
-func NewCustomCheck(path, check string) *CustomCheck {
-	return &CustomCheck{path: path, check: regexp.MustCompile(regexp.QuoteMeta(check))}
-}
-
 func (c *Checker) start() {
 	for i, target := range c.targets {
 		if c.logger != nil {
-			c.logger.Debug("health", "starting health check for", "path", c.path, target, "with interval", c.interval)
+			c.logger.Debug("health", "starting health check for path", c.sourcePath, target, "with interval", c.interval)
 		}
 		go c.healthCheckLoop(i, target)
 	}
 }
 
 func (c *Checker) healthCheckLoop(index int, target string) {
-	var (
-		healthy    bool
-		healthFunc func(string) bool
-		err        error
-	)
-	if c.CustomCheck != nil {
-		target, err = url.JoinPath(target, c.CustomCheck.path)
-		if err != nil {
-			panic(err)
-		}
-		healthFunc = c.custom
+	var healthFunc func(string) bool
+	checkTarget, err := url.JoinPath(target, c.checkPath)
+	if err != nil {
+		panic(err)
+	}
+	if c.regex != nil {
+		healthFunc = c.regexCheck
 	} else {
-		healthFunc = c.ping
+		healthFunc = c.pingCheck
 	}
 	for {
-		healthy = healthFunc(target)
+		healthy := healthFunc(checkTarget)
 		if c.logger != nil {
-			c.logger.Debug("health", "path", c.path, "target", target, "healthy:", healthy)
+			c.logger.Debug("health", "path", c.sourcePath, "target", target, "healthy:", healthy)
 		}
 		c.mutex.Lock()
 		c.status[index] = healthy
@@ -104,7 +96,7 @@ func (c *Checker) healthCheckLoop(index int, target string) {
 	}
 }
 
-func (c *Checker) custom(target string) bool {
+func (c *Checker) regexCheck(target string) bool {
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 	if err != nil {
 		panic(err)
@@ -130,10 +122,10 @@ func (c *Checker) custom(target string) bool {
 		}
 		return false
 	}
-	return c.check.MatchString(string(bytes))
+	return c.regex.MatchString(string(bytes))
 }
 
-func (c *Checker) ping(target string) bool {
+func (c *Checker) pingCheck(target string) bool {
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 	if err != nil {
 		panic(err)
